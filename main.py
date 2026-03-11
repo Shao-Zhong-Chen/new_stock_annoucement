@@ -89,11 +89,28 @@ def run_crawler():
                 
                 # 🎯 修正核心：用日期物件進行比對，不管跨月、補零都不會錯！
                 if start_date_obj <= today_date <= end_date_obj:
+                    # 🆕 修正：更強健的數值解析與錯誤追蹤
                     try:
-                        shares = int(item[11].replace(',', ''))
-                        sub_price_per_share = float(item[12].replace(',', ''))
-                    except (ValueError, IndexError):
-                        continue
+                        # 先清理字串中的逗號與空白
+                        shares_str = str(item[11]).replace(',', '').strip()
+                        price_str = str(item[12]).replace(',', '').strip()
+                        
+                        # 預防證交所回傳 "--" 或空字串，給予合理預設值
+                        if not shares_str or shares_str == '--': 
+                            shares_str = '1000'
+                        if not price_str or price_str == '--': 
+                            price_str = '0'
+
+                        # 先轉 float 解決 "1000.0" 的問題，再轉 int
+                        shares = int(float(shares_str))
+                        sub_price_per_share = float(price_str)
+                        
+                    except Exception as e:
+                        # 🎯 把錯誤印出來，不要默默吞掉！
+                        print(f"⚠️ 略過 {name}({code})，數值解析失敗。")
+                        print(f"   欄位 [11]股數: '{item[11]}' / [12]承銷價: '{item[12]}'")
+                        print(f"   錯誤原因: {e}")
+                        continue # 只有真的爛掉才跳過
 
                     h_data = histock_info.get(code, {'market_price': 0, 'yield': 'N/A'})
                     
@@ -102,14 +119,14 @@ def run_crawler():
                     if h_data['market_price'] > 0:
                         total_diff = int((h_data['market_price'] - sub_price_per_share) * shares)
 
+                    # 組合單筆股票的文字
                     msg = (
-                        f"📢 抽籤通知\n"
-                        f"{name}({code})\n"
+                        f"📢 抽籤通知：{name}({code})\n"
                         f"　價差：{total_diff:,}元（~{h_data['yield']}%）\n"
                         f"　申購價：{total_sub_price:,}元\n"
                         f"　截止日期：{item[6].strip()}"
                     )
-                    messages_to_send.append(TextMessage(text=msg))
+                    stock_text_blocks.append(msg)
 
                     if idx == 0 and code != last_code:
                         with open(LAST_ID_FILE, "w") as f:
