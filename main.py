@@ -59,58 +59,79 @@ def run_crawler():
             res = requests.get(API_URL, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
             data = res.json()
             twse_data = data.get('data', [])
+            fields = data.get('fields', []) # 🆕 取得 API 的欄位名稱對照表
             
             if not twse_data:
                 print("今日證交所無公開申購資料。")
                 return
 
+            # 留下 Log 以利未來如果有其他欄位異動時可以對照
+            print(f"📊 API 欄位對照: {fields}")
+
+            # 🎯 終極解法：動態尋找欄位 Index (容忍證交所隨意調動欄位)
+            # 先給定舊的欄位位置當作備用預設值
+            idx_name = 2
+            idx_code = 3
+            idx_start = 5
+            idx_end = 6
+            idx_shares = 11
+            idx_price = 12
+            
+            # 如果證交所有提供欄位名稱，就動態找出來
+            if fields:
+                idx_name = next((i for i, f in enumerate(fields) if '名稱' in f), idx_name)
+                idx_code = next((i for i, f in enumerate(fields) if '代號' in f), idx_code)
+                idx_start = next((i for i, f in enumerate(fields) if '開始日' in f), idx_start)
+                idx_end = next((i for i, f in enumerate(fields) if '截止日' in f), idx_end)
+                
+                # 價格優先找「實際承銷價」，沒有再找「承銷價」
+                idx_price = next((i for i, f in enumerate(fields) if '實際承銷價' in f), -1)
+                if idx_price == -1:
+                    idx_price = next((i for i, f in enumerate(fields) if '承銷價' in f), 12)
+                    
+                # 股數找「申購股數」或「承銷股數」
+                idx_shares = next((i for i, f in enumerate(fields) if '申購股數' in f), -1)
+                if idx_shares == -1:
+                    idx_shares = next((i for i, f in enumerate(fields) if '股數' in f), 11)
+
             histock_info = get_histock_prices()
-            
-            # 🆕 修正：獲取「今日」的 datetime.date 物件
             today_date = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date()
-            messages_to_send = []
             
+            stock_text_blocks = []
             last_code = ""
             if os.path.exists(LAST_ID_FILE):
                 with open(LAST_ID_FILE, "r") as f:
                     last_code = f.read().strip()
 
             for idx, item in enumerate(twse_data):
-                name = item[2].strip()
-                code = str(item[3]).strip()
+                # 🆕 全面改用動態 Index
+                name = str(item[idx_name]).strip()
+                code = str(item[idx_code]).strip()
                 
-                # 🆕 修正：將 API 日期轉為真正的日期物件
                 try:
-                    start_date_obj = parse_twse_date(item[5].strip())
-                    end_date_obj = parse_twse_date(item[6].strip())
+                    start_date_obj = parse_twse_date(str(item[idx_start]).strip())
+                    end_date_obj = parse_twse_date(str(item[idx_end]).strip())
                 except Exception as e:
                     print(f"日期解析失敗 ({code}): {e}")
                     continue
                 
-                # 🎯 修正核心：用日期物件進行比對，不管跨月、補零都不會錯！
                 if start_date_obj <= today_date <= end_date_obj:
-                    # 🆕 修正：更強健的數值解析與錯誤追蹤
                     try:
-                        # 先清理字串中的逗號與空白
-                        shares_str = str(item[11]).replace(',', '').strip()
-                        price_str = str(item[12]).replace(',', '').strip()
+                        # 🆕 全面改用動態 Index
+                        shares_str = str(item[idx_shares]).replace(',', '').strip()
+                        price_str = str(item[idx_price]).replace(',', '').strip()
                         
-                        # 預防證交所回傳 "--" 或空字串，給予合理預設值
-                        if not shares_str or shares_str == '--': 
-                            shares_str = '1000'
-                        if not price_str or price_str == '--': 
-                            price_str = '0'
+                        if not shares_str or shares_str == '--': shares_str = '1000'
+                        if not price_str or price_str == '--': price_str = '0'
 
-                        # 先轉 float 解決 "1000.0" 的問題，再轉 int
                         shares = int(float(shares_str))
                         sub_price_per_share = float(price_str)
                         
                     except Exception as e:
-                        # 🎯 把錯誤印出來，不要默默吞掉！
                         print(f"⚠️ 略過 {name}({code})，數值解析失敗。")
-                        print(f"   欄位 [11]股數: '{item[11]}' / [12]承銷價: '{item[12]}'")
+                        print(f"   欄位 [{idx_shares}]股數: '{item[idx_shares]}' / [{idx_price}]承銷價: '{item[idx_price]}'")
                         print(f"   錯誤原因: {e}")
-                        continue # 只有真的爛掉才跳過
+                        continue 
 
                     h_data = histock_info.get(code, {'market_price': 0, 'yield': 'N/A'})
                     
@@ -119,12 +140,11 @@ def run_crawler():
                     if h_data['market_price'] > 0:
                         total_diff = int((h_data['market_price'] - sub_price_per_share) * shares)
 
-                    # 組合單筆股票的文字
                     msg = (
                         f"📢 抽籤通知：{name}({code})\n"
                         f"　價差：{total_diff:,}元（~{h_data['yield']}%）\n"
                         f"　申購價：{total_sub_price:,}元\n"
-                        f"　截止日期：{item[6].strip()}"
+                        f"　截止日期：{item[idx_end].strip()}"
                     )
                     stock_text_blocks.append(msg)
 
@@ -133,21 +153,24 @@ def run_crawler():
                             f.write(code)
 
             # --- 執行發送 ---
-            if messages_to_send:
-                # 🆕 修正：確保股票訊息最多 4 則，保留第 5 則的位置給 Flex Message
-                final_messages = messages_to_send[:4]
+            if stock_text_blocks:
+                messages_to_send = []
+                
+                # 將所有股票文字區塊用兩個換行符號合併成一則長訊息
+                combined_text = "\n\n".join(stock_text_blocks)
+                messages_to_send.append(TextMessage(text=combined_text))
                 
                 flex_msg = FlexMessage(
                     alt_text="🎁 領取您的 Percento 專屬折扣",
                     contents=get_percento_flex()
                 )
-                final_messages.append(flex_msg)
+                messages_to_send.append(flex_msg)
                 
                 line_bot_api.push_message(PushMessageRequest(
                     to=GROUP_ID, 
-                    messages=final_messages
+                    messages=messages_to_send
                 ))
-                print(f"✅ 成功發送 {len(final_messages)} 則訊息 (含折扣推播)。")
+                print(f"✅ 成功發送 {len(stock_text_blocks)} 檔股票資訊 (合併為 1 則訊息) 與折扣推播。")
             else:
                 print(f"今日 ({today_date}) 無符合申購期間之案件。")
 
