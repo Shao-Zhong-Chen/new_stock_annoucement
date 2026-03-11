@@ -31,11 +31,9 @@ def get_histock_prices():
             for row in rows:
                 cells = row.find_all('td')
                 if len(cells) < 10: continue
-                # 取得代號
                 code_match = re.search(r'(\d{4,})', cells[1].get_text())
                 if code_match:
                     code = code_match.group(1)
-                    # 索引：[5] 收盤價, [9] 報酬率(%)
                     m_price = cells[5].get_text(strip=True).replace(',', '')
                     yield_val = cells[9].get_text(strip=True).replace('%', '')
                     prices[code] = {
@@ -46,13 +44,12 @@ def get_histock_prices():
         print(f"⚠️ HiStock 資料抓取失敗: {e}")
     return prices
 
-def get_today_tw():
-    """獲取台灣目前的日期 (民國年且補零)，例如 115/03/11"""
-    now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
-    return f"{now.year - 1911}/{now.strftime('%m/%d')}"
+# 🆕 新增：將 TWSE 民國日期轉為西元 datetime.date 物件
+def parse_twse_date(date_str):
+    parts = date_str.split('/')
+    return datetime.date(int(parts[0]) + 1911, int(parts[1]), int(parts[2]))
 
 def run_crawler():
-    # 初始化 API 客戶端
     conf = Configuration(access_token=LINE_ACCESS_TOKEN)
     with ApiClient(conf) as api_client:
         line_bot_api = MessagingApi(api_client)
@@ -68,25 +65,30 @@ def run_crawler():
                 return
 
             histock_info = get_histock_prices()
-            today_tw = get_today_tw()
+            
+            # 🆕 修正：獲取「今日」的 datetime.date 物件
+            today_date = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date()
             messages_to_send = []
             
-            # 讀取上次代號紀錄 [cite: 2]
             last_code = ""
             if os.path.exists(LAST_ID_FILE):
                 with open(LAST_ID_FILE, "r") as f:
                     last_code = f.read().strip()
 
             for idx, item in enumerate(twse_data):
-                # 正確欄位索引：
-                # [2]名稱, [3]代號, [5]開始日, [6]截止日, [11]股數, [12]承銷單價
                 name = item[2].strip()
                 code = str(item[3]).strip()
-                start_date = item[5].strip()
-                end_date = item[6].strip()
                 
-                # 判定邏輯：只要今天在申購期間內（含開始與結束當日）
-                if start_date <= today_tw <= end_date:
+                # 🆕 修正：將 API 日期轉為真正的日期物件
+                try:
+                    start_date_obj = parse_twse_date(item[5].strip())
+                    end_date_obj = parse_twse_date(item[6].strip())
+                except Exception as e:
+                    print(f"日期解析失敗 ({code}): {e}")
+                    continue
+                
+                # 🎯 修正核心：用日期物件進行比對，不管跨月、補零都不會錯！
+                if start_date_obj <= today_date <= end_date_obj:
                     try:
                         shares = int(item[11].replace(',', ''))
                         sub_price_per_share = float(item[12].replace(',', ''))
@@ -95,46 +97,42 @@ def run_crawler():
 
                     h_data = histock_info.get(code, {'market_price': 0, 'yield': 'N/A'})
                     
-                    # 計算總金額
-                    # 申購價 = 承銷價 * 股數
                     total_sub_price = int(sub_price_per_share * shares)
-                    # 價差 = (現價 - 承銷價) * 股數
                     total_diff = 0
                     if h_data['market_price'] > 0:
                         total_diff = int((h_data['market_price'] - sub_price_per_share) * shares)
 
-                    # 依照預期格式組合訊息
                     msg = (
                         f"📢 抽籤通知\n"
                         f"{name}({code})\n"
                         f"　價差：{total_diff:,}元（~{h_data['yield']}%）\n"
                         f"　申購價：{total_sub_price:,}元\n"
-                        f"　截止日期：{end_date}"
+                        f"　截止日期：{item[6].strip()}"
                     )
                     messages_to_send.append(TextMessage(text=msg))
 
-                    # 紀錄最新一筆股票代號
                     if idx == 0 and code != last_code:
                         with open(LAST_ID_FILE, "w") as f:
                             f.write(code)
 
             # --- 執行發送 ---
             if messages_to_send:
-                # 只要有股票資訊，就附加 Percento Flex Message
+                # 🆕 修正：確保股票訊息最多 4 則，保留第 5 則的位置給 Flex Message
+                final_messages = messages_to_send[:4]
+                
                 flex_msg = FlexMessage(
                     alt_text="🎁 領取您的 Percento 專屬折扣",
                     contents=get_percento_flex()
                 )
-                messages_to_send.append(flex_msg)
+                final_messages.append(flex_msg)
                 
-                # LINE 一次 Push 最多 5 則訊息
                 line_bot_api.push_message(PushMessageRequest(
                     to=GROUP_ID, 
-                    messages=messages_to_send[:5]
+                    messages=final_messages
                 ))
-                print(f"✅ 成功發送 {len(messages_to_send)} 則訊息。")
+                print(f"✅ 成功發送 {len(final_messages)} 則訊息 (含折扣推播)。")
             else:
-                print(f"今日 ({today_tw}) 無符合申購期間之案件。")
+                print(f"今日 ({today_date}) 無符合申購期間之案件。")
 
         except Exception as e:
             print(f"❌ 執行失敗：{e}")
