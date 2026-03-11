@@ -27,19 +27,34 @@ def get_histock_prices():
         soup = BeautifulSoup(res.text, 'html.parser')
         table = soup.find('table', {'class': 'gvTB'})
         if table:
+            # 🆕 動態抓取欄位名稱，避免 HiStock 改版導致抓錯
+            th_elements = table.find_all('th')
+            headers_text = [th.get_text(strip=True) for th in th_elements]
+            
+            # 尋找「市價」與「報酬率(%)」的正確位置
+            idx_market_price = next((i for i, h in enumerate(headers_text) if '市價' in h), 5)
+            idx_yield = next((i for i, h in enumerate(headers_text) if '報酬率' in h), 9)
+
             rows = table.find_all('tr')[1:]
             for row in rows:
                 cells = row.find_all('td')
-                if len(cells) < 10: continue
+                if len(cells) <= max(idx_market_price, idx_yield): continue
+                
+                # 取得代號
                 code_match = re.search(r'(\d{4,})', cells[1].get_text())
                 if code_match:
                     code = code_match.group(1)
-                    m_price = cells[5].get_text(strip=True).replace(',', '')
-                    yield_val = cells[9].get_text(strip=True).replace('%', '')
-                    prices[code] = {
-                        'market_price': float(m_price) if m_price and m_price != '--' else 0,
-                        'yield': yield_val
-                    }
+                    # 取得市價與報酬率
+                    m_price = cells[idx_market_price].get_text(strip=True).replace(',', '')
+                    yield_val = cells[idx_yield].get_text(strip=True).replace('%', '')
+                    
+                    try:
+                        prices[code] = {
+                            'market_price': float(m_price) if m_price and m_price != '--' else 0,
+                            'yield': yield_val
+                        }
+                    except ValueError:
+                        prices[code] = {'market_price': 0, 'yield': 'N/A'}
     except Exception as e:
         print(f"⚠️ HiStock 資料抓取失敗: {e}")
     return prices
@@ -140,11 +155,13 @@ def run_crawler():
                     if h_data['market_price'] > 0:
                         total_diff = int((h_data['market_price'] - sub_price_per_share) * shares)
 
+                    # 組合單筆股票的文字 (修正排版與換行)
                     msg = (
-                        f"📢 抽籤通知：{name}({code})\n"
+                        f"📢抽籤通知\n"
+                        f"{name} ({code})\n"
                         f"　價差：{total_diff:,}元（~{h_data['yield']}%）\n"
                         f"　申購價：{total_sub_price:,}元\n"
-                        f"　截止日期：{item[idx_end].strip()}"
+                        f"　截止日期：{str(item[idx_end]).strip()}"
                     )
                     stock_text_blocks.append(msg)
 
